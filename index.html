@@ -10,7 +10,7 @@
 <!-- Firebase SDKs -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence }
   from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc }
   from "https://www.gstatic.com/firebasejs/12.10.0/firebase-firestore.js";
@@ -30,26 +30,25 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const provider = new GoogleAuthProvider();
 
-// ── doGoogleLogin — called by button onclick ──
+// ── PERSISTENCE: login 1 week tak rehega, refresh se logout nahi hoga ──
+setPersistence(auth, browserLocalPersistence).catch(e => console.error('Persistence error:', e));
+
+// ── doGoogleLogin ──
 window.doGoogleLogin = async function() {
   const btn = document.getElementById('google-login-btn');
   const errEl = document.getElementById('auth-err');
-  btn.disabled = true;
-  btn.innerHTML = '<span style="display:inline-block;animation:pulse 1s infinite">⏳</span>&nbsp; Login ho raha hai...';
-  errEl.classList.remove('show');
+  if(btn) { btn.disabled = true; btn.innerHTML = '<span style="animation:pulse 1s infinite;display:inline-block">⏳</span>&nbsp; Login ho raha hai...'; }
+  if(errEl) errEl.classList.remove('show');
   try {
     await signInWithPopup(auth, provider);
-    // onAuthStateChanged will handle the rest
   } catch(e) {
     let msg = 'Login failed. ';
-    if(e.code === 'auth/popup-blocked') msg += 'Popup block hua — browser mein popup allow karo.';
-    else if(e.code === 'auth/popup-closed-by-user') msg += 'Popup band kar diya.';
-    else if(e.code === 'auth/unauthorized-domain') msg += 'Yeh domain authorized nahi. Firebase Console → Authentication → Settings → Authorized Domains mein domain add karo.';
+    if(e.code === 'auth/popup-blocked') msg += 'Popup block hua — browser mein allow karo.';
+    else if(e.code === 'auth/popup-closed-by-user') msg += 'Popup band ho gaya.';
+    else if(e.code === 'auth/unauthorized-domain') msg += 'Domain authorized nahi — Firebase Console → Auth → Settings → Authorized Domains mein add karo.';
     else msg += e.message;
-    errEl.textContent = msg;
-    errEl.classList.add('show');
-    btn.disabled = false;
-    btn.innerHTML = '<div class="g-icon"></div>Google se Login karo';
+    if(errEl){ errEl.textContent = msg; errEl.classList.add('show'); }
+    if(btn){ btn.disabled = false; btn.innerHTML = '<div class=\"g-icon\"></div>Google se Login karo'; }
   }
 };
 
@@ -60,33 +59,46 @@ window.doLogout = async function() {
   catch(e) { window.showNotif && window.showNotif('Logout error', 'err'); }
 };
 
-// ── Firestore helpers exposed ──
+// ── Firestore: load ──
 window._fbLoadUser = async function(uid) {
   try {
     const snap = await getDoc(doc(db, 'users', uid));
     return snap.exists() ? snap.data() : null;
-  } catch(e) { console.error('Load error:', e); return null; }
+  } catch(e) { console.error('Firestore load error:', e); return null; }
 };
 
+// ── Firestore: save ──
 window._fbSaveUser = async function(uid, data) {
   try {
     await setDoc(doc(db, 'users', uid), data);
     return true;
-  } catch(e) { console.error('Save error:', e); return false; }
+  } catch(e) { console.error('Firestore save error:', e); return false; }
 };
 
-// ── Auth state listener ──
+// ── Auth state — Firebase khud session remember karta hai ──
+let authResolved = false;
 onAuthStateChanged(auth, (user) => {
   if (user) {
     window._currentFBUser = user;
     if (window.onFirebaseLogin) window.onFirebaseLogin(user);
   } else {
-    window._currentFBUser = null;
-    if (window.onFirebaseLogout) window.onFirebaseLogout();
+    if (authResolved) {
+      // Sirf tab logout karo jab user ne manually logout kiya ho
+      window._currentFBUser = null;
+      if (window.onFirebaseLogout) window.onFirebaseLogout();
+    } else {
+      // Pehli baar null aaya — auth still initializing, show auth screen
+      setTimeout(() => {
+        if (!window._currentFBUser) {
+          if (window.onFirebaseLogout) window.onFirebaseLogout();
+        }
+      }, 2000);
+    }
   }
+  authResolved = true;
 });
 
-// ── Bind login button AFTER module loads ──
+// ── Button bind ──
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('google-login-btn');
   if (btn) btn.addEventListener('click', window.doGoogleLogin);
@@ -858,6 +870,7 @@ function setSyncStatus(state) {
 
 // ── AUTH CALLBACKS (called from module) ──
 window.onFirebaseLogin = async function(user) {
+  if (currentUID === user.uid) return; // already loaded, prevent double call
   currentUID = user.uid;
   showNotif('🔄 Data load ho raha hai...', 'info');
   await loadFromFirestore(user.uid);
@@ -865,9 +878,14 @@ window.onFirebaseLogin = async function(user) {
   document.getElementById('auth-screen').classList.add('gone');
   updateUserUI(user);
   if (userPIN) {
+    // PIN hai — verify screen dikhao
     showPinScreen('verify', user);
   } else {
-    showPinSetup(user);
+    // PIN nahi hai — seedha app mein jaao, PIN setup optional
+    document.getElementById('pin-screen').classList.add('gone');
+    document.getElementById('main-app').style.display = 'flex';
+    launchApp();
+    showNotif('Login ho gaya! ☁️ Data synced', 'ok');
   }
 };
 
@@ -1361,7 +1379,7 @@ window.onload=function(){
       document.getElementById('loading-screen').classList.add('gone');
       document.getElementById('auth-screen').classList.remove('gone');
     }
-  }, 3000);
+  }, 5000);
 };
 </script>
 </body>
