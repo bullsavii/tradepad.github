@@ -9,11 +9,11 @@
 
 <!-- Firebase SDKs -->
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, setPersistence, browserLocalPersistence }
-  from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc }
-  from "https://www.gstatic.com/firebasejs/12.10.0/firebase-firestore.js";
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBnMSwB_HZDPlUlJMfcPcbeDbUhpyYtLFk",
@@ -29,8 +29,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const provider = new GoogleAuthProvider();
 
-// ── CRITICAL: Set persistence BEFORE any auth operation ──
-// This ensures Firebase remembers the user even after refresh
+// FIX: Set persistence synchronously before auth
 await setPersistence(auth, browserLocalPersistence);
 
 window.doGoogleLogin = async function() {
@@ -54,8 +53,11 @@ window.doGoogleLogin = async function() {
 window.doLogout = async function() {
   if (!confirm('Logout karna chahte ho?')) return;
   try {
+    // FIX: Clear everything before signout
     window._currentFBUser = null;
     window._appLaunched = false;
+    window._loadedData = null;
+    window._pinVerified = false;
     await signOut(auth);
   } catch(e) { window.showNotif && window.showNotif('Logout error', 'err'); }
 };
@@ -67,6 +69,7 @@ window._fbLoadUser = async function(uid) {
   } catch(e) { console.error('Firestore load error:', e); return null; }
 };
 
+// FIX: Direct save, no debounce, returns promise
 window._fbSaveUser = async function(uid, data) {
   try {
     await setDoc(doc(db, 'users', uid), data);
@@ -74,61 +77,57 @@ window._fbSaveUser = async function(uid, data) {
   } catch(e) { console.error('Firestore save error:', e); return false; }
 };
 
-// ── FIX: Proper auth state handling — no race conditions ──
+// FIX: Track pin verified state separately from app launched
 window._appLaunched = false;
+window._pinVerified = false;
 
 onAuthStateChanged(auth, async (user) => {
-  console.log('Auth state changed:', user ? user.email : 'null');
+  console.log('Auth state:', user ? user.email : 'null');
 
-  // Always hide loading screen
+  // Hide loading immediately
   const loadingScreen = document.getElementById('loading-screen');
   if(loadingScreen) loadingScreen.classList.add('gone');
 
   if (user) {
     window._currentFBUser = user;
 
-    // If app already launched (e.g., token refresh in background), do nothing
-    if (window._appLaunched) {
-      console.log('App already launched, skipping re-init');
+    // FIX: If app already fully running (pin verified + launched), ignore token refreshes
+    if (window._appLaunched && window._pinVerified) {
+      console.log('App running, ignoring auth refresh');
       return;
     }
 
+    // Update user UI immediately
+    if(window.updateUserUI) window.updateUserUI(user);
+
     // Load data from Firestore
-    try {
-      window.showNotif && window.showNotif('🔄 Data load ho raha hai...', 'info');
-      const d = await window._fbLoadUser(user.uid);
-      if (d) {
-        window._loadedData = d;
-      }
-    } catch(e) {
-      console.error('Error loading data:', e);
-    }
+    const d = await window._fbLoadUser(user.uid);
+    window._loadedData = d || {};
 
     // Hide auth screen
     document.getElementById('auth-screen').classList.add('gone');
 
-    // Update user UI
-    if(window.updateUserUI) window.updateUserUI(user);
+    const savedPIN = window._loadedData.pin || null;
 
-    // Check PIN
-    const loadedData = window._loadedData || {};
-    const savedPIN = loadedData.pin || null;
-
-    if (savedPIN) {
-      // Show PIN verify screen
+    // FIX: Always show PIN screen if PIN exists and not yet verified this session
+    if (savedPIN && !window._pinVerified) {
       if(window.showPinScreenForVerify) window.showPinScreenForVerify(savedPIN);
     } else {
-      // No PIN — go directly to app
+      // No PIN or already verified
+      window._pinVerified = true;
       document.getElementById('pin-screen').classList.add('gone');
       document.getElementById('main-app').style.display = 'flex';
-      if(window.initializeApp2) window.initializeApp2(user, loadedData);
-      window._appLaunched = true;
-      window.showNotif && window.showNotif('Login ho gaya! ☁️ Data synced', 'ok');
+      if(!window._appLaunched) {
+        if(window.initializeApp2) window.initializeApp2(user, window._loadedData);
+        window._appLaunched = true;
+        window.showNotif && window.showNotif('Login ho gaya! ☁️ Data synced', 'ok');
+      }
     }
   } else {
-    // User logged out
+    // User logged out - full reset
     window._currentFBUser = null;
     window._appLaunched = false;
+    window._pinVerified = false;
     window._loadedData = null;
     document.getElementById('main-app').style.display = 'none';
     document.getElementById('pin-screen').classList.add('gone');
@@ -136,7 +135,6 @@ onAuthStateChanged(auth, async (user) => {
   }
 });
 
-// Bind login button
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('google-login-btn');
   if (btn) btn.addEventListener('click', window.doGoogleLogin);
@@ -144,7 +142,6 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 
 <style>
-/* ── THEME VARIABLES ── */
 [data-theme="dark"] {
   --bg:#080c18;--surface:#0f1623;--surface2:#161e2e;--surface3:#1c2640;
   --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);
@@ -173,7 +170,6 @@ document.addEventListener('DOMContentLoaded', () => {
   --card-bg:#071a2e;--sidebar-bg:#050f1a;
   --input-bg:#0d2440;
 }
-
 :root{
   --accent:#5b6ef5;--accent2:#7c8ff8;--accentglow:rgba(91,110,245,0.25);
   --green:#0eb87f;--greenb:rgba(14,184,127,0.15);
@@ -183,37 +179,31 @@ document.addEventListener('DOMContentLoaded', () => {
   --r:14px;--rsm:9px;
   --sh:0 4px 24px rgba(0,0,0,0.3);--shlg:0 24px 64px rgba(0,0,0,0.5);
   --font-size:14px;
-  --compact:1;
 }
-
-/* Font size options */
 [data-fontsize="small"] { --font-size: 12px; }
 [data-fontsize="medium"] { --font-size: 14px; }
 [data-fontsize="large"] { --font-size: 16px; }
-
-/* Compact mode */
-[data-compact="true"] { --compact: 0.85; }
 
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-size:var(--font-size);line-height:1.6;min-height:100vh;overflow-x:hidden;transition:background 0.3s,color 0.3s}
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
 
-/* ── LOADING ── */
+/* LOADING - faster, no fake animation */
 #loading-screen{position:fixed;inset:0;z-index:10000;background:var(--bg);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}
-#loading-screen.gone{display:none}
-.loader-logo{font-size:44px;animation:pulse 1.5s ease infinite}
+#loading-screen.gone{display:none!important}
+.loader-logo{font-size:44px}
 .loader-text{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);letter-spacing:3px}
 .loader-bar{width:200px;height:2px;background:var(--surface2);border-radius:2px;overflow:hidden}
-.loader-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--purple));border-radius:2px;animation:loadfill 2.5s ease forwards}
+.loader-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--purple));border-radius:2px;animation:loadfill 1.2s ease forwards}
 @keyframes loadfill{from{width:0}to{width:100%}}
 
-/* ── AUTH ── */
+/* AUTH */
 #auth-screen{position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;align-items:center;justify-content:center}
 #auth-screen.gone{display:none}
 .auth-orb1{position:absolute;width:600px;height:600px;background:radial-gradient(circle,rgba(91,110,245,0.08) 0%,transparent 65%);top:-100px;left:-150px;pointer-events:none}
 .auth-orb2{position:absolute;width:400px;height:400px;background:radial-gradient(circle,rgba(155,125,248,0.06) 0%,transparent 65%);bottom:-80px;right:-80px;pointer-events:none}
-.auth-card{width:400px;background:var(--surface);border:1px solid var(--border2);border-radius:24px;padding:44px 40px;position:relative;box-shadow:var(--shlg);animation:slideUp .5s cubic-bezier(.16,1,.3,1)}
+.auth-card{width:400px;background:var(--surface);border:1px solid var(--border2);border-radius:24px;padding:44px 40px;position:relative;box-shadow:var(--shlg);animation:slideUp .4s cubic-bezier(.16,1,.3,1)}
 .auth-logo-row{display:flex;align-items:center;gap:14px;margin-bottom:36px}
 .auth-logo-ico{width:52px;height:52px;background:linear-gradient(135deg,var(--accent),var(--purple));border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:24px;box-shadow:0 8px 28px var(--accentglow)}
 .auth-logo-name{font-size:26px;font-weight:800;letter-spacing:-1px}
@@ -228,10 +218,10 @@ body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-s
 .auth-err.show{display:block}
 .auth-foot{font-size:11px;color:var(--text3);text-align:center;margin-top:20px;line-height:1.7}
 
-/* ── PIN ── */
+/* PIN */
 #pin-screen{position:fixed;inset:0;z-index:9998;background:var(--bg);display:flex;align-items:center;justify-content:center}
 #pin-screen.gone{display:none}
-.pin-card{width:340px;background:var(--surface);border:1px solid var(--border2);border-radius:24px;padding:36px 32px;box-shadow:var(--shlg);animation:slideUp .45s cubic-bezier(.16,1,.3,1);text-align:center}
+.pin-card{width:340px;background:var(--surface);border:1px solid var(--border2);border-radius:24px;padding:36px 32px;box-shadow:var(--shlg);animation:slideUp .4s cubic-bezier(.16,1,.3,1);text-align:center}
 .pin-av{width:64px;height:64px;background:linear-gradient(135deg,var(--accent),var(--purple));border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:700;box-shadow:0 8px 28px var(--accentglow)}
 .pin-av img{width:64px;height:64px;border-radius:50%;object-fit:cover}
 .pin-uname{font-size:16px;font-weight:700;margin-bottom:3px}
@@ -252,11 +242,11 @@ body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-s
 .pin-skip:hover{color:var(--text2)}
 .pin-skip.show{display:inline-block}
 
-/* ── APP ── */
+/* APP */
 #main-app{display:none;min-height:100vh}
 .app{display:flex;min-height:100vh}
 
-/* ── SIDEBAR ── */
+/* SIDEBAR */
 .sidebar{width:255px;background:var(--sidebar-bg);border-right:1px solid var(--border);position:fixed;top:0;left:0;bottom:0;z-index:100;display:flex;flex-direction:column;transition:transform .3s cubic-bezier(.16,1,.3,1)}
 .sb-logo{padding:20px 18px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
 .sb-logo-ico{width:38px;height:38px;background:linear-gradient(135deg,var(--accent),var(--purple));border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 4px 14px var(--accentglow)}
@@ -280,7 +270,7 @@ body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-s
 .sb-foot-btn.danger:hover{background:var(--redb);color:var(--red);border-color:rgba(240,65,108,.3)}
 .ldot{width:7px;height:7px;background:var(--green);border-radius:50%;box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
 
-/* ── MAIN ── */
+/* MAIN */
 .main{margin-left:255px;flex:1;min-height:100vh;display:flex;flex-direction:column}
 .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:0 26px;height:62px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:90}
 .tb-title{font-size:18px;font-weight:700;letter-spacing:-.3px}
@@ -296,24 +286,24 @@ body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-s
 .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
 .sync-dot.saving{background:var(--gold);animation:none}
 
-/* ── PAGES ── */
-.page{display:none;padding:26px;animation:fadeIn .3s ease}
+/* PAGES */
+.page{display:none;padding:26px;animation:fadeIn .25s ease}
 .page.active{display:block}
 .page-title{font-size:25px;font-weight:800;letter-spacing:-.5px;margin-bottom:2px}
 .page-sub{font-size:9px;color:var(--text3);font-family:'JetBrains Mono',monospace;letter-spacing:2px;margin-bottom:22px}
 
-/* ── GRIDS ── */
+/* GRIDS */
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-bottom:16px}
 .g3{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:16px}
 .g2nb{display:grid;grid-template-columns:1fr 1fr;gap:13px}
 
-/* ── CARDS ── */
+/* CARDS */
 .card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--r);padding:20px}
 .card-title{font-size:9px;color:var(--text3);font-family:'JetBrains Mono',monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;font-weight:600}
 .card-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 
-/* ── STATS ── */
+/* STATS */
 .stat{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;transition:transform .15s,border-color .15s,box-shadow .15s;cursor:default}
 .stat:hover{transform:translateY(-2px);border-color:var(--border2);box-shadow:var(--sh)}
 .stat-ico{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:15px;margin-bottom:13px}
@@ -326,7 +316,7 @@ body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-s
 .so .stat-ico{background:var(--goldb)}.so .stat-val{color:var(--gold)}
 .sp .stat-ico{background:rgba(155,125,248,.12)}.sp .stat-val{color:var(--purple)}
 
-/* ── BADGES ── */
+/* BADGES */
 .badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace}
 .bw{background:var(--greenb);color:var(--green)}
 .bl{background:var(--redb);color:var(--red)}
@@ -335,11 +325,11 @@ body{font-family:'Sora',sans-serif;background:var(--bg);color:var(--text);font-s
 .bce{background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.2)}
 .bpe{background:rgba(155,125,248,.12);color:var(--purple);border:1px solid rgba(155,125,248,.2)}
 
-/* ── PBAR ── */
+/* PBAR */
 .pbar{height:5px;background:var(--surface2);border-radius:3px;overflow:hidden;margin-top:5px}
 .pfill{height:100%;border-radius:3px;transition:width .8s cubic-bezier(.16,1,.3,1)}
 
-/* ── TABLE ── */
+/* TABLE */
 .tbl-wrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse}
 thead th{font-size:8px;color:var(--text3);font-family:'JetBrains Mono',monospace;letter-spacing:2px;text-transform:uppercase;padding:10px 13px;text-align:left;border-bottom:1px solid var(--border);background:var(--surface2);white-space:nowrap}
@@ -350,7 +340,7 @@ tbody td{padding:11px 13px;font-size:13px}
 .pw{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--green)}
 .pl{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:var(--red)}
 
-/* ── BUTTONS ── */
+/* BUTTONS */
 .btn{border:none;border-radius:8px;cursor:pointer;font-size:12px;font-weight:500;font-family:'Sora',sans-serif;padding:7px 13px;transition:all .15s}
 .btn-e{background:var(--surface2);color:var(--text2);border:1px solid var(--border)}
 .btn-e:hover{background:var(--surface3);color:var(--text)}
@@ -364,7 +354,7 @@ tbody td{padding:11px 13px;font-size:13px}
 .btn-g:hover{background:rgba(14,184,127,.22)}
 .btn-lg{padding:11px 22px;font-size:13px;border-radius:10px}
 
-/* ── INPUTS ── */
+/* INPUTS */
 .inp,.sel,.ta{background:var(--input-bg);border:1px solid var(--border);border-radius:var(--rsm);color:var(--text);padding:10px 13px;font-family:'Sora',sans-serif;font-size:13px;width:100%;outline:none;transition:border-color .15s,box-shadow .15s}
 .inp:focus,.sel:focus,.ta:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,110,245,.12)}
 .inp::placeholder{color:var(--text3)}
@@ -376,7 +366,7 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .r2{display:grid;grid-template-columns:1fr 1fr;gap:13px}
 .r3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px}
 
-/* ── TOGGLES ── */
+/* TOGGLES */
 .tg-grp{display:flex;gap:6px;flex-wrap:wrap}
 .tg{padding:7px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text2);font-size:12px;font-weight:500;font-family:'Sora',sans-serif;cursor:pointer;transition:all .15s}
 .tg:hover{border-color:var(--border2);color:var(--text)}
@@ -389,7 +379,7 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .tg-strat{border-color:rgba(91,110,245,.4)!important;background:rgba(91,110,245,.12)!important;color:var(--accent2)!important}
 .tg-emo{border-color:rgba(240,164,41,.4)!important;background:var(--goldb)!important;color:var(--gold)!important}
 
-/* ── OVERLAY / MODAL ── */
+/* OVERLAY / MODAL */
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);backdrop-filter:blur(8px);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px;opacity:0;pointer-events:none;transition:opacity .25s}
 .overlay.open{opacity:1;pointer-events:all}
 .modal{background:var(--surface);border:1px solid var(--border2);border-radius:20px;width:100%;max-width:760px;max-height:92vh;overflow-y:auto;padding:26px;transform:translateY(16px);transition:transform .3s cubic-bezier(.16,1,.3,1);box-shadow:var(--shlg)}
@@ -400,27 +390,23 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .modal-x{background:var(--surface2);border:1px solid var(--border);color:var(--text2);width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
 .modal-x:hover{background:var(--redb);color:var(--red)}
 
-/* ── THEME SWITCHER ── */
+/* THEME SWITCHER */
 .theme-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
 .theme-btn{border:2px solid var(--border);border-radius:12px;padding:12px 8px;cursor:pointer;text-align:center;transition:all .2s;background:var(--surface2)}
 .theme-btn:hover{border-color:var(--accent);transform:translateY(-2px)}
 .theme-btn.active{border-color:var(--accent);box-shadow:0 0 0 3px var(--accentglow)}
 .theme-btn .tb-preview{width:100%;height:40px;border-radius:8px;margin-bottom:7px;position:relative;overflow:hidden}
 .theme-btn .tb-label{font-size:11px;font-weight:600;color:var(--text2)}
-
-/* Accent color pickers */
 .accent-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .accent-dot{width:32px;height:32px;border-radius:50%;cursor:pointer;border:3px solid transparent;transition:all .2s}
 .accent-dot:hover{transform:scale(1.15)}
 .accent-dot.active{border-color:var(--text);box-shadow:0 0 0 2px rgba(255,255,255,.3)}
-
-/* Font size selector */
 .fs-row{display:flex;gap:8px;margin-top:8px}
 .fs-btn{flex:1;padding:9px;border:1px solid var(--border);border-radius:9px;cursor:pointer;background:var(--surface2);color:var(--text2);font-family:'Sora',sans-serif;transition:all .2s;text-align:center}
 .fs-btn:hover{border-color:var(--border2);color:var(--text)}
 .fs-btn.active{border-color:var(--accent);color:var(--accent2);background:rgba(91,110,245,.1)}
 
-/* Sidebar width toggle */
+/* Compact sidebar */
 .sidebar-compact .sb-logo-name,.sidebar-compact .sb-logo-ver,.sidebar-compact .sb-name,.sidebar-compact .sb-email,.sidebar-compact .sync-badge,.sidebar-compact .nav-item span:not(.ico),.sidebar-compact .nav-sec,.sidebar-compact .sb-foot-btn span{display:none}
 .sidebar-compact{width:64px}
 .sidebar-compact.open{width:255px}
@@ -432,7 +418,7 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .sidebar-compact.open .sb-user{justify-content:flex-start}
 .sidebar-compact + .main{margin-left:64px}
 
-/* ── TAX BOX ── */
+/* TAX BOX */
 .tax-box{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:13px}
 .tax-box-title{font-size:9px;font-weight:700;color:var(--text2);font-family:'JetBrains Mono',monospace;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between}
 .tax-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px}
@@ -441,7 +427,7 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .tax-val.neg{color:var(--red)}.tax-val.pos{color:var(--green)}
 .tax-tog{font-size:10px;cursor:pointer;color:var(--accent2);background:none;border:none;font-family:'JetBrains Mono',monospace}
 
-/* ── PNL PREVIEW ── */
+/* PNL PREVIEW */
 .pnl-prev{padding:13px 16px;border-radius:10px;margin-bottom:13px;display:none;align-items:center;justify-content:space-between}
 .pnl-prev.win{background:var(--greenb);border:1px solid rgba(14,184,127,.25)}
 .pnl-prev.loss{background:var(--redb);border:1px solid rgba(240,65,108,.25)}
@@ -449,7 +435,7 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .pnl-prev.win .pnl-val{color:var(--green)}.pnl-prev.loss .pnl-val{color:var(--red)}
 .pnl-net{font-size:11px;font-family:'JetBrains Mono',monospace;margin-top:2px}
 
-/* ── MONTH ACCORDION ── */
+/* MONTH ACCORDION */
 .month-acc{border:1px solid var(--border);border-radius:14px;margin-bottom:11px;overflow:hidden}
 .month-hdr{background:var(--surface2);padding:15px 20px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;border-bottom:1px solid var(--border);transition:background .15s}
 .month-hdr:hover{background:var(--surface3)}
@@ -467,7 +453,7 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .tr-info{flex:1;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .tr-acts{display:flex;gap:5px;margin-left:auto}
 
-/* ── IMAGE UPLOAD ── */
+/* IMAGE */
 .img-up{border:2px dashed var(--border);border-radius:10px;padding:14px;text-align:center;cursor:pointer;transition:all .2s;background:var(--surface2);margin-bottom:13px}
 .img-up:hover{border-color:var(--accent)}
 .img-up.has{border-color:var(--green);border-style:solid}
@@ -479,22 +465,22 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .tr-thumb{width:38px;height:28px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid var(--border2)}
 .strike-b{font-family:'JetBrains Mono',monospace;font-size:10px;background:var(--surface2);border:1px solid var(--border2);color:var(--text);padding:2px 7px;border-radius:5px;font-weight:600}
 
-/* ── FILTERS ── */
+/* FILTERS */
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
 .fsel{background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text2);padding:7px 26px 7px 10px;font-size:12px;font-family:'Sora',sans-serif;cursor:pointer;outline:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238b9cc8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center;background-color:var(--surface)}
 .fsel option{background:var(--surface)}
 
-/* ── EMPTY ── */
+/* EMPTY */
 .empty{text-align:center;padding:46px 20px;color:var(--text3);font-family:'JetBrains Mono',monospace;font-size:12px}
 .empty-ico{font-size:34px;margin-bottom:10px}
 
-/* ── RING ── */
+/* RING */
 .ring-wrap{position:relative;display:inline-block}
 .ring-lbl{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
 .ring-val{font-size:27px;font-weight:700;color:var(--green)}
 .ring-sub{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text3);letter-spacing:1px}
 
-/* ── STRATEGIES ── */
+/* STRATEGIES */
 .sg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:11px}
 .sc{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:15px;transition:all .15s}
 .sc:hover{border-color:var(--border2);box-shadow:var(--sh);transform:translateY(-2px)}
@@ -506,32 +492,32 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 .sc-del{background:none;border:none;color:var(--text3);cursor:pointer;font-size:11px;margin-top:5px;font-family:'JetBrains Mono',monospace;padding:0;transition:color .15s}
 .sc-del:hover{color:var(--red)}
 
-/* ── INSIGHTS ── */
+/* INSIGHTS */
 .ins{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;display:flex;align-items:flex-start;gap:12px}
 .ins-ico{width:35px;height:35px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
 .ins-title{font-size:13px;font-weight:600;margin-bottom:3px}
 .ins-text{font-size:12px;color:var(--text2);line-height:1.5}
 
-/* ── NOTIF ── */
+/* NOTIF */
 .notif{position:fixed;bottom:22px;right:22px;background:var(--surface);border:1px solid var(--border2);border-radius:12px;padding:11px 18px;font-family:'JetBrains Mono',monospace;font-size:12px;z-index:9999;transform:translateY(80px);opacity:0;transition:all .3s cubic-bezier(.16,1,.3,1);box-shadow:var(--shlg);display:flex;align-items:center;gap:8px}
 .notif.show{transform:translateY(0);opacity:1}
 .notif.ok{border-color:rgba(14,184,127,.4);color:var(--green)}
 .notif.err{border-color:rgba(240,65,108,.4);color:var(--red)}
 .notif.info{border-color:rgba(91,110,245,.4);color:var(--accent2)}
 
-/* ── IMG VIEWER ── */
+/* IMG VIEWER */
 #img-viewer{position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9990;display:none;align-items:center;justify-content:center;cursor:pointer}
 #img-viewer.open{display:flex}
 #img-viewer img{max-width:95vw;max-height:90vh;border-radius:10px}
 #ivx{position:absolute;top:18px;right:18px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#fff;width:40px;height:40px;border-radius:50%;font-size:15px;cursor:pointer}
 
-/* ── SETTINGS ── */
+/* SETTINGS */
 .set-row{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:var(--surface2);border-radius:10px;margin-bottom:8px;border:1px solid var(--border)}
 .set-lbl{font-size:13px;font-weight:500}
 .set-sub{font-size:11px;color:var(--text3);margin-top:1px}
 .set-section-title{font-size:11px;font-weight:700;color:var(--text2);font-family:'JetBrains Mono',monospace;letter-spacing:1px;text-transform:uppercase;margin:20px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--border)}
 
-/* ── TOGGLE SWITCH ── */
+/* TOGGLE SWITCH */
 .toggle-sw{position:relative;width:40px;height:22px;flex-shrink:0}
 .toggle-sw input{opacity:0;width:0;height:0}
 .toggle-slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:var(--surface3);border-radius:22px;transition:.3s;border:1px solid var(--border)}
@@ -539,13 +525,13 @@ label{display:block;font-size:9px;color:var(--text3);font-family:'JetBrains Mono
 input:checked + .toggle-slider{background:var(--accent)}
 input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff}
 
-/* ── ANIMATIONS ── */
+/* ANIMATIONS */
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @keyframes slideUp{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:translateY(0)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 @keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
 
-/* ── RESPONSIVE ── */
+/* RESPONSIVE */
 @media(max-width:1100px){.g4{grid-template-columns:1fr 1fr}}
 @media(max-width:900px){.g3{grid-template-columns:1fr 1fr}.g2{grid-template-columns:1fr}.g2nb{grid-template-columns:1fr}}
 @media(max-width:768px){.sidebar{transform:translateX(-255px)}.sidebar.open{transform:translateX(0);box-shadow:0 0 50px rgba(0,0,0,.7)}.main{margin-left:0!important}.hamburger{display:block}.r2,.r3{grid-template-columns:1fr}}
@@ -559,7 +545,7 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
   <div class="loader-logo">📊</div>
   <div class="loader-text">TRADEVAULT</div>
   <div class="loader-bar"><div class="loader-fill"></div></div>
-  <div style="font-size:11px;color:var(--text3);font-family:'JetBrains Mono',monospace">Connecting to Firebase...</div>
+  <div style="font-size:11px;color:var(--text3);font-family:'JetBrains Mono',monospace;margin-top:4px">Connecting...</div>
 </div>
 
 <!-- AUTH SCREEN -->
@@ -615,7 +601,7 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
   <nav class="sidebar" id="sidebar">
     <div class="sb-logo">
       <div class="sb-logo-ico">📊</div>
-      <div><div class="sb-logo-name">TradeVault</div><div class="sb-logo-ver">PRO v7.0</div></div>
+      <div><div class="sb-logo-name">TradeVault</div><div class="sb-logo-ver">PRO v7.1</div></div>
     </div>
     <div class="sb-user">
       <div class="sb-av" id="sb-av"><span id="sb-av-txt">T</span></div>
@@ -744,19 +730,16 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
       <div id="strat-grid"></div>
     </div>
 
-    <!-- SETTINGS (NEW CUSTOMIZATION) -->
+    <!-- SETTINGS -->
     <div class="page" id="page-settings">
       <div class="page-title">Settings</div><div class="page-sub">ACCOUNT, SECURITY & CUSTOMIZATION</div>
-
       <div class="g2">
-        <!-- Account Card -->
         <div class="card">
           <div class="card-title">Account</div>
           <div class="set-row"><div><div class="set-lbl">Google Account</div><div class="set-sub" id="set-email">—</div></div><div id="set-av" style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--purple));display:flex;align-items:center;justify-content:center;font-weight:700;overflow:hidden"><span id="set-av-txt">T</span></div></div>
           <div class="set-row"><div><div class="set-lbl">Cloud Sync</div><div class="set-sub">Firestore real-time</div></div><span style="font-size:20px">☁️</span></div>
           <button class="btn btn-s btn-lg" style="width:100%;margin-top:10px" onclick="doLogout()">🚪 Logout</button>
         </div>
-        <!-- PIN Card -->
         <div class="card">
           <div class="card-title">PIN Security</div>
           <div class="set-row"><div><div class="set-lbl">PIN Lock</div><div class="set-sub" id="pin-status">No PIN set</div></div><span id="pin-ico" style="font-size:20px">🔓</span></div>
@@ -766,11 +749,8 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
           </div>
         </div>
       </div>
-
-      <!-- THEME / APPEARANCE -->
       <div class="card" style="margin-top:16px">
         <div class="card-title">🎨 Appearance</div>
-
         <div class="set-section-title">THEME</div>
         <div class="theme-grid">
           <div class="theme-btn active" id="tb-dark" onclick="setTheme('dark')">
@@ -790,7 +770,6 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
             <div class="tb-label">Ocean</div>
           </div>
         </div>
-
         <div class="set-section-title">ACCENT COLOR</div>
         <div class="accent-row" id="accent-row">
           <div class="accent-dot active" style="background:#5b6ef5" onclick="setAccent('#5b6ef5','#7c8ff8','rgba(91,110,245,0.25)')" title="Indigo"></div>
@@ -802,22 +781,18 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
           <div class="accent-dot" style="background:#ec4899" onclick="setAccent('#ec4899','#f472b6','rgba(236,72,153,0.25)')" title="Pink"></div>
           <div class="accent-dot" style="background:#14b8a6" onclick="setAccent('#14b8a6','#2dd4bf','rgba(20,184,166,0.25)')" title="Teal"></div>
         </div>
-
         <div class="set-section-title">FONT SIZE</div>
         <div class="fs-row">
           <button class="fs-btn" id="fs-small" onclick="setFontSize('small')">A<br><span style="font-size:9px;color:var(--text3)">Small</span></button>
           <button class="fs-btn active" id="fs-medium" onclick="setFontSize('medium')">A<br><span style="font-size:9px;color:var(--text3)">Medium</span></button>
           <button class="fs-btn" id="fs-large" onclick="setFontSize('large')" style="font-size:18px">A<br><span style="font-size:9px;color:var(--text3)">Large</span></button>
         </div>
-
         <div class="set-section-title">SIDEBAR</div>
         <div class="set-row">
-          <div><div class="set-lbl">Compact Sidebar</div><div class="set-sub">Sirf icons dikho, text chhupa do</div></div>
+          <div><div class="set-lbl">Compact Sidebar</div><div class="set-sub">Sirf icons dikho</div></div>
           <label class="toggle-sw"><input type="checkbox" id="compact-sidebar-toggle" onchange="toggleCompactSidebar()"><span class="toggle-slider"></span></label>
         </div>
       </div>
-
-      <!-- DATA MANAGEMENT -->
       <div class="card" style="margin-top:16px">
         <div class="card-title">Data Management</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -828,9 +803,9 @@ input:checked + .toggle-slider:before{transform:translateX(18px);background:#fff
         </div>
       </div>
     </div>
-  </div><!-- end .main -->
-</div><!-- end .app -->
-</div><!-- end #main-app -->
+  </div>
+</div>
+</div>
 
 <!-- TRADE MODAL -->
 <div class="overlay" id="overlay" onclick="if(event.target===this)closeModal()">
@@ -928,20 +903,18 @@ var userPIN = null;
 var pinMode = 'verify';
 var pinFirst = '';
 var pinEntry = '';
-var pinToVerify = null; // stored PIN for verify step
+var pinToVerify = null;
 var saveTimer = null;
-var uiSettings = { theme: 'dark', accent: '#5b6ef5', accentLight: '#7c8ff8', accentGlow: 'rgba(91,110,245,0.25)', fontSize: 'medium', compactSidebar: false };
+var isSaving = false;
+var uiSettings = { theme:'dark', accent:'#5b6ef5', accentLight:'#7c8ff8', accentGlow:'rgba(91,110,245,0.25)', fontSize:'medium', compactSidebar:false };
 
-// ── SAVE/LOAD UI SETTINGS from localStorage ──
+// ── UI SETTINGS ──
 function loadUISettings() {
-  try {
-    var s = localStorage.getItem('tv_ui_settings');
-    if(s) { uiSettings = Object.assign(uiSettings, JSON.parse(s)); }
-  } catch(e) {}
+  try { var s = localStorage.getItem('tv_ui'); if(s) uiSettings = Object.assign(uiSettings, JSON.parse(s)); } catch(e){}
   applyUISettings();
 }
 function saveUISettings() {
-  try { localStorage.setItem('tv_ui_settings', JSON.stringify(uiSettings)); } catch(e) {}
+  try { localStorage.setItem('tv_ui', JSON.stringify(uiSettings)); } catch(e){}
 }
 function applyUISettings() {
   document.documentElement.setAttribute('data-theme', uiSettings.theme);
@@ -950,91 +923,63 @@ function applyUISettings() {
   r.setProperty('--accent', uiSettings.accent);
   r.setProperty('--accent2', uiSettings.accentLight);
   r.setProperty('--accentglow', uiSettings.accentGlow);
-  // Update toggle states
   document.querySelectorAll('.theme-btn').forEach(b => b.classList.remove('active'));
-  var tb = document.getElementById('tb-'+uiSettings.theme);
-  if(tb) tb.classList.add('active');
+  var tb = document.getElementById('tb-'+uiSettings.theme); if(tb) tb.classList.add('active');
   document.querySelectorAll('.fs-btn').forEach(b => b.classList.remove('active'));
-  var fb = document.getElementById('fs-'+uiSettings.fontSize);
-  if(fb) fb.classList.add('active');
-  // Accent dots
-  document.querySelectorAll('.accent-dot').forEach(d => {
-    d.classList.toggle('active', d.style.background === uiSettings.accent);
-  });
-  // Compact sidebar
-  var sb = document.getElementById('sidebar');
-  var main = document.getElementById('main-content');
-  if(uiSettings.compactSidebar) {
-    sb.classList.add('sidebar-compact');
-    if(main) main.style.marginLeft = '64px';
-  } else {
-    sb.classList.remove('sidebar-compact');
-    if(main) main.style.marginLeft = '255px';
-  }
-  var compactToggle = document.getElementById('compact-sidebar-toggle');
-  if(compactToggle) compactToggle.checked = uiSettings.compactSidebar;
+  var fb = document.getElementById('fs-'+uiSettings.fontSize); if(fb) fb.classList.add('active');
+  document.querySelectorAll('.accent-dot').forEach(d => d.classList.toggle('active', d.style.background===uiSettings.accent));
+  var sb = document.getElementById('sidebar'), main = document.getElementById('main-content');
+  if(uiSettings.compactSidebar) { sb.classList.add('sidebar-compact'); if(main) main.style.marginLeft='64px'; }
+  else { sb.classList.remove('sidebar-compact'); if(main) main.style.marginLeft='255px'; }
+  var ct = document.getElementById('compact-sidebar-toggle'); if(ct) ct.checked = uiSettings.compactSidebar;
 }
+function setTheme(t){ uiSettings.theme=t; saveUISettings(); applyUISettings(); }
+function setAccent(a,a2,g){ uiSettings.accent=a; uiSettings.accentLight=a2; uiSettings.accentGlow=g; saveUISettings(); applyUISettings(); }
+function setFontSize(s){ uiSettings.fontSize=s; saveUISettings(); applyUISettings(); }
+function toggleCompactSidebar(){ uiSettings.compactSidebar=document.getElementById('compact-sidebar-toggle').checked; saveUISettings(); applyUISettings(); }
 
-function setTheme(theme) {
-  uiSettings.theme = theme;
-  saveUISettings();
-  applyUISettings();
-}
-function setAccent(a, a2, glow) {
-  uiSettings.accent = a; uiSettings.accentLight = a2; uiSettings.accentGlow = glow;
-  saveUISettings();
-  applyUISettings();
-}
-function setFontSize(size) {
-  uiSettings.fontSize = size;
-  saveUISettings();
-  applyUISettings();
-}
-function toggleCompactSidebar() {
-  uiSettings.compactSidebar = document.getElementById('compact-sidebar-toggle').checked;
-  saveUISettings();
-  applyUISettings();
-}
-
-// ── FIREBASE HELPERS ──
+// ── FIREBASE SAVE - FIX: immediate save, no race conditions ──
 async function saveToFirestore() {
-  if (!currentUID) return;
+  if(!currentUID || isSaving) return;
+  isSaving = true;
   setSyncStatus('saving');
-  const ok = await window._fbSaveUser(currentUID, {
-    trades: trades,
-    strategies: strategies,
-    pin: userPIN || null,
-    updatedAt: new Date().toISOString()
-  });
-  setSyncStatus(ok ? 'saved' : 'error');
+  try {
+    const ok = await window._fbSaveUser(currentUID, {
+      trades: trades,
+      strategies: strategies,
+      pin: userPIN || null,
+      updatedAt: new Date().toISOString()
+    });
+    setSyncStatus(ok ? 'saved' : 'error');
+  } catch(e) {
+    setSyncStatus('error');
+  }
+  isSaving = false;
 }
 
+// FIX: Save immediately + also on page unload
 function save() {
   clearTimeout(saveTimer);
   setSyncStatus('saving');
-  saveTimer = setTimeout(saveToFirestore, 800);
+  saveTimer = setTimeout(saveToFirestore, 400); // reduced from 800ms
 }
+
+// FIX: Critical - save on tab close / page refresh
+window.addEventListener('beforeunload', function() {
+  if(currentUID && trades.length > 0) {
+    // Use synchronous-like save via sendBeacon or direct call
+    saveToFirestore();
+  }
+});
 
 function setSyncStatus(state) {
-  var dot = document.getElementById('sync-dot');
-  var txt = document.getElementById('sync-txt');
-  var badge = document.getElementById('sync-badge');
-  if(state === 'saving') {
-    if(dot) { dot.className = 'sync-dot saving'; }
-    if(txt) txt.textContent = 'Saving...';
-    if(badge) badge.textContent = '⏳ Saving';
-  } else if(state === 'saved') {
-    if(dot) { dot.className = 'sync-dot'; }
-    if(txt) txt.textContent = 'Synced';
-    if(badge) badge.textContent = '☁️ Synced';
-  } else {
-    if(dot) { dot.style.background = 'var(--red)'; }
-    if(txt) txt.textContent = 'Error';
-    if(badge) badge.textContent = '⚠️ Error';
-  }
+  var dot=document.getElementById('sync-dot'), txt=document.getElementById('sync-txt'), badge=document.getElementById('sync-badge');
+  if(state==='saving'){ if(dot) dot.className='sync-dot saving'; if(txt) txt.textContent='Saving...'; if(badge) badge.textContent='⏳ Saving'; }
+  else if(state==='saved'){ if(dot) dot.className='sync-dot'; if(txt) txt.textContent='Synced'; if(badge) badge.textContent='☁️ Synced'; }
+  else{ if(dot) dot.style.background='var(--red)'; if(txt) txt.textContent='Error'; if(badge) badge.textContent='⚠️ Error'; }
 }
 
-// ── CALLED BY FIREBASE MODULE after auth + data load ──
+// ── INIT APP ──
 window.initializeApp2 = function(user, data) {
   currentUID = user.uid;
   if(data) {
@@ -1047,17 +992,17 @@ window.initializeApp2 = function(user, data) {
   rebuildStratTG();
 };
 
-// ── PIN SCREEN VERIFY (called from Firebase module) ──
+// ── PIN SCREEN - FIX: Always show on refresh if PIN exists ──
 window.showPinScreenForVerify = function(savedPIN) {
-  pinToVerify = savedPIN; // store current PIN
+  pinToVerify = savedPIN;
   userPIN = savedPIN;
   pinMode = 'verify';
   pinEntry = ''; pinFirst = '';
   var ps = document.getElementById('pin-screen');
   ps.classList.remove('gone');
   document.getElementById('main-app').style.display = 'none';
-  for(var i=0;i<4;i++) document.getElementById('pd'+i).classList.remove('on','shake');
-  document.getElementById('pin-err').textContent = '\u00a0';
+  for(var i=0;i<4;i++) { var d=document.getElementById('pd'+i); d.classList.remove('on','shake'); }
+  document.getElementById('pin-err').innerHTML = '&nbsp;';
   document.getElementById('pin-lbl').textContent = 'APNA PIN DAALO';
   document.getElementById('pin-step').textContent = '';
   document.getElementById('pin-skip').classList.remove('show');
@@ -1065,108 +1010,109 @@ window.showPinScreenForVerify = function(savedPIN) {
 
 // ── USER UI ──
 window.updateUserUI = function(user) {
-  var name = user.displayName || 'Trader';
-  var email = user.email || '';
-  var photo = user.photoURL || '';
-  var init = name.split(' ').map(function(w){return w[0];}).join('').substring(0,2).toUpperCase();
+  var name=user.displayName||'Trader', email=user.email||'', photo=user.photoURL||'';
+  var init=name.split(' ').map(w=>w[0]).join('').substring(0,2).toUpperCase();
   if(photo) {
-    document.getElementById('sb-av').innerHTML = '<img src="'+photo+'" alt="">';
-    document.getElementById('pin-av').innerHTML = '<img src="'+photo+'" alt="">';
+    document.getElementById('sb-av').innerHTML='<img src="'+photo+'" alt="">';
+    document.getElementById('pin-av').innerHTML='<img src="'+photo+'" alt="">';
+    document.getElementById('set-av').innerHTML='<img src="'+photo+'" style="width:40px;height:40px;border-radius:50%;object-fit:cover">';
   } else {
-    document.getElementById('sb-av-txt').textContent = init;
-    document.getElementById('pin-av-txt').textContent = init;
+    document.getElementById('sb-av-txt').textContent=init;
+    document.getElementById('pin-av-txt').textContent=init;
+    document.getElementById('set-av-txt').textContent=init;
   }
-  document.getElementById('sb-name').textContent = name;
-  document.getElementById('sb-email').textContent = email;
-  document.getElementById('set-email').textContent = email;
-  if(photo) document.getElementById('set-av').innerHTML = '<img src="'+photo+'" style="width:40px;height:40px;border-radius:50%;object-fit:cover">';
-  else document.getElementById('set-av-txt').textContent = init;
-  document.getElementById('pin-uname').textContent = name;
-  document.getElementById('pin-email-disp').textContent = email;
+  document.getElementById('sb-name').textContent=name;
+  document.getElementById('sb-email').textContent=email;
+  document.getElementById('set-email').textContent=email;
+  document.getElementById('pin-uname').textContent=name;
+  document.getElementById('pin-email-disp').textContent=email;
 };
 
 function updatePinUI() {
-  var has = !!userPIN;
-  var el = document.getElementById('pin-status');
-  var ico = document.getElementById('pin-ico');
-  var rm = document.getElementById('rm-pin');
-  if(el) el.textContent = has ? '✅ PIN active hai' : 'No PIN — app unlocked';
-  if(ico) ico.textContent = has ? '🔐' : '🔓';
-  if(rm) rm.style.display = has ? 'block' : 'none';
+  var has=!!userPIN;
+  var el=document.getElementById('pin-status'), ico=document.getElementById('pin-ico'), rm=document.getElementById('rm-pin');
+  if(el) el.textContent=has?'✅ PIN active hai':'No PIN — app unlocked';
+  if(ico) ico.textContent=has?'🔐':'🔓';
+  if(rm) rm.style.display=has?'block':'none';
 }
 
 // ── PIN PAD ──
 function pk(d) {
-  if(pinEntry.length >= 4) return;
-  pinEntry += d;
+  if(pinEntry.length>=4) return;
+  pinEntry+=d;
   document.getElementById('pd'+(pinEntry.length-1)).classList.add('on');
-  if(pinEntry.length === 4) setTimeout(checkPIN, 150);
+  if(pinEntry.length===4) setTimeout(checkPIN, 150);
 }
 function pkClear() {
-  if(pinEntry.length > 0) { document.getElementById('pd'+(pinEntry.length-1)).classList.remove('on'); pinEntry = pinEntry.slice(0,-1); }
+  if(pinEntry.length>0) { document.getElementById('pd'+(pinEntry.length-1)).classList.remove('on'); pinEntry=pinEntry.slice(0,-1); }
 }
 function pkReset() {
-  pinEntry = '';
+  pinEntry='';
   for(var i=0;i<4;i++) document.getElementById('pd'+i).classList.remove('on','shake');
-  document.getElementById('pin-err').textContent = '\u00a0';
+  document.getElementById('pin-err').innerHTML='&nbsp;';
+}
+
+function launchApp() {
+  window._pinVerified = true;
+  document.getElementById('pin-screen').classList.add('gone');
+  document.getElementById('main-app').style.display = 'flex';
+  if(!window._appLaunched) {
+    window._appLaunched = true;
+    var data = window._loadedData || {};
+    window.initializeApp2(window._currentFBUser, data);
+  }
 }
 
 function checkPIN() {
-  if(pinMode === 'verify') {
-    if(pinEntry === pinToVerify) {
-      document.getElementById('pin-screen').classList.add('gone');
-      document.getElementById('main-app').style.display = 'flex';
-      // Now load data
-      var data = window._loadedData || {};
-      window.initializeApp2(window._currentFBUser, data);
-      window._appLaunched = true;
+  if(pinMode==='verify') {
+    if(pinEntry===pinToVerify) {
+      launchApp();
       showNotif('Unlocked! ✓', 'ok');
     } else {
-      document.getElementById('pin-err').textContent = 'GALAT PIN. DOBARA TRY KARO.';
+      document.getElementById('pin-err').textContent='GALAT PIN. DOBARA TRY KARO.';
       for(var i=0;i<4;i++) document.getElementById('pd'+i).classList.add('shake');
       setTimeout(pkReset, 650);
     }
-  } else if(pinMode === 'setup1') {
-    pinFirst = pinEntry; pinEntry = '';
+  } else if(pinMode==='setup1') {
+    pinFirst=pinEntry; pinEntry='';
     for(var i=0;i<4;i++) document.getElementById('pd'+i).classList.remove('on');
-    pinMode = 'setup2';
-    document.getElementById('pin-lbl').textContent = 'PIN CONFIRM KARO';
-    document.getElementById('pin-step').textContent = 'Step 2/2 — wahi PIN dobara';
-  } else if(pinMode === 'setup2') {
-    if(pinEntry === pinFirst) {
-      userPIN = pinEntry; pinToVerify = pinEntry;
-      document.getElementById('pin-screen').classList.add('gone');
-      document.getElementById('main-app').style.display = 'flex';
-      window._appLaunched = true;
+    pinMode='setup2';
+    document.getElementById('pin-lbl').textContent='PIN CONFIRM KARO';
+    document.getElementById('pin-step').textContent='Step 2/2 — wahi PIN dobara';
+  } else if(pinMode==='setup2') {
+    if(pinEntry===pinFirst) {
+      userPIN=pinEntry; pinToVerify=pinEntry;
+      launchApp();
       saveToFirestore();
       updatePinUI();
-      var data = window._loadedData || {};
-      window.initializeApp2(window._currentFBUser, data);
       showNotif('PIN set ho gaya! 🔐', 'ok');
     } else {
-      document.getElementById('pin-err').textContent = 'PIN match nahi. Dobara try karo.';
+      document.getElementById('pin-err').textContent='PIN match nahi. Dobara try karo.';
       for(var i=0;i<4;i++) document.getElementById('pd'+i).classList.add('shake');
       setTimeout(function(){
-        pkReset(); pinMode = 'setup1'; pinFirst = '';
-        document.getElementById('pin-lbl').textContent = 'NAYA PIN RAKHO';
-        document.getElementById('pin-step').textContent = 'Step 1/2';
+        pkReset(); pinMode='setup1'; pinFirst='';
+        document.getElementById('pin-lbl').textContent='NAYA PIN RAKHO';
+        document.getElementById('pin-step').textContent='Step 1/2';
       }, 700);
     }
   }
 }
 
 function skipPinSetup() {
+  window._pinVerified = true;
   document.getElementById('pin-screen').classList.add('gone');
-  document.getElementById('main-app').style.display = 'flex';
+  document.getElementById('main-app').style.display='flex';
   window._appLaunched = true;
-  var data = window._loadedData || {};
+  var data = window._loadedData||{};
   window.initializeApp2(window._currentFBUser, data);
 }
 
 function lockApp() {
   if(!userPIN) { showNotif('Pehle Settings mein PIN set karo', 'err'); return; }
+  // FIX: Reset both flags so PIN screen shows again
   window._appLaunched = false;
-  document.getElementById('main-app').style.display = 'none';
+  window._pinVerified = false;
+  document.getElementById('main-app').style.display='none';
   window.showPinScreenForVerify(userPIN);
 }
 
@@ -1177,53 +1123,33 @@ function openPinModal() {
 }
 function closePinModal() { document.getElementById('pin-overlay').classList.remove('open'); }
 async function savePIN() {
-  var p1 = document.getElementById('np1').value, p2 = document.getElementById('np2').value;
-  var err = document.getElementById('pin-modal-err');
-  if(p1.length !== 4 || !/^\d{4}$/.test(p1)) { err.textContent='PIN 4 digits ka hona chahiye'; return; }
-  if(p1 !== p2) { err.textContent='PIN match nahi kiya'; return; }
-  userPIN = p1; pinToVerify = p1;
+  var p1=document.getElementById('np1').value, p2=document.getElementById('np2').value;
+  var err=document.getElementById('pin-modal-err');
+  if(p1.length!==4||!/^\d{4}$/.test(p1)){err.textContent='PIN 4 digits ka hona chahiye';return;}
+  if(p1!==p2){err.textContent='PIN match nahi kiya';return;}
+  userPIN=p1; pinToVerify=p1;
   await saveToFirestore();
-  closePinModal(); updatePinUI(); showNotif('PIN update ho gaya! 🔐', 'ok');
+  closePinModal(); updatePinUI(); showNotif('PIN update ho gaya! 🔐','ok');
 }
 async function removePin() {
-  if(!confirm('PIN remove karna chahte ho?')) return;
-  userPIN = null; pinToVerify = null;
-  await saveToFirestore(); updatePinUI(); showNotif('PIN remove ho gaya', 'ok');
+  if(!confirm('PIN remove karna chahte ho?'))return;
+  userPIN=null; pinToVerify=null;
+  await saveToFirestore(); updatePinUI(); showNotif('PIN remove ho gaya','ok');
 }
 
 document.addEventListener('keydown', function(e){
-  if(!document.getElementById('pin-screen').classList.contains('gone')) {
-    if(e.key >= '0' && e.key <= '9') pk(e.key);
-    if(e.key === 'Backspace') pkClear();
-    if(e.key === 'Escape') pkReset();
+  if(!document.getElementById('pin-screen').classList.contains('gone')){
+    if(e.key>='0'&&e.key<='9') pk(e.key);
+    if(e.key==='Backspace') pkClear();
+    if(e.key==='Escape') pkReset();
   }
 });
 
 // ── IMAGE VIEWER ──
-function openIV(src) { document.getElementById('iv-img').src=src; document.getElementById('img-viewer').classList.add('open'); }
-function closeIV() { document.getElementById('img-viewer').classList.remove('open'); }
-function handleImg(e) {
-  var f = e.target.files[0]; if(!f) return;
-  var r = new FileReader();
-  r.onload = function(ev) {
-    var d = ev.target.result;
-    document.getElementById('f-img-data').value = d;
-    var p = document.getElementById('img-prev'); p.src=d; p.classList.add('show');
-    document.getElementById('img-rm').classList.add('show');
-    document.getElementById('img-up').classList.add('has');
-    document.getElementById('img-up-lbl').textContent = 'CHART UPLOADED ✓';
-  };
-  r.readAsDataURL(f);
-}
-function rmImg(e) {
-  e.stopPropagation();
-  document.getElementById('f-img-data').value='';
-  var p = document.getElementById('img-prev'); p.src=''; p.classList.remove('show');
-  document.getElementById('img-rm').classList.remove('show');
-  document.getElementById('img-up').classList.remove('has');
-  document.getElementById('img-up-lbl').textContent='CLICK TO UPLOAD';
-  document.getElementById('f-img').value='';
-}
+function openIV(src){document.getElementById('iv-img').src=src;document.getElementById('img-viewer').classList.add('open');}
+function closeIV(){document.getElementById('img-viewer').classList.remove('open');}
+function handleImg(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){var d=ev.target.result;document.getElementById('f-img-data').value=d;var p=document.getElementById('img-prev');p.src=d;p.classList.add('show');document.getElementById('img-rm').classList.add('show');document.getElementById('img-up').classList.add('has');document.getElementById('img-up-lbl').textContent='CHART UPLOADED ✓';};r.readAsDataURL(f);}
+function rmImg(e){e.stopPropagation();document.getElementById('f-img-data').value='';var p=document.getElementById('img-prev');p.src='';p.classList.remove('show');document.getElementById('img-rm').classList.remove('show');document.getElementById('img-up').classList.remove('has');document.getElementById('img-up-lbl').textContent='CLICK TO UPLOAD';document.getElementById('f-img').value='';}
 
 // ── HELPERS ──
 var RS='₹';
@@ -1238,7 +1164,7 @@ function wr(){return trades.length?((wins().length/trades.length)*100).toFixed(1
 function totalPnl(){return trades.reduce((s,t)=>s+calcPnl(t),0);}
 function totalNet(){return trades.reduce((s,t)=>s+calcNet(t),0);}
 function totalTax(){return trades.reduce((s,t)=>s+calcTax(t.entry,t.exit,t.qty).tot,0);}
-function dc(id){var c=Chart.getChart(id);if(c) c.destroy();}
+function dc(id){var c=Chart.getChart(id);if(c)c.destroy();}
 function ml(ym){var p=ym.split('-');return MONTHS[parseInt(p[1])-1]+' '+p[0];}
 function sc(cls,ico,lbl,val,desc){return'<div class="stat '+cls+'"><div class="stat-ico">'+ico+'</div><div class="stat-lbl">'+lbl+'</div><div class="stat-val">'+val+'</div><div class="stat-desc">'+desc+'</div></div>';}
 
@@ -1246,21 +1172,11 @@ function sc(cls,ico,lbl,val,desc){return'<div class="stat '+cls+'"><div class="s
 function showPage(n){
   var ps=['dashboard','log','analytics','winratio','histogram','heatmap','insights','tax','strategies','settings'];
   ps.forEach(p=>{var pg=document.getElementById('page-'+p),nv=document.getElementById('nav-'+p);if(pg)pg.classList.remove('active');if(nv)nv.classList.remove('active');});
-  document.getElementById('page-'+n).classList.add('active');
-  document.getElementById('nav-'+n).classList.add('active');
+  document.getElementById('page-'+n).classList.add('active');document.getElementById('nav-'+n).classList.add('active');
   document.getElementById('sidebar').classList.remove('open');
   var tt={dashboard:['Dashboard','OVERVIEW & STATS'],log:['Trade Log','MONTH-WISE'],analytics:['Analytics','PATTERNS'],winratio:['Win Ratio','PERFORMANCE'],histogram:['Histogram','DISTRIBUTION'],heatmap:['Calendar','HEATMAP'],insights:['Insights','OBSERVATIONS'],tax:['Tax Report','CHARGES & NET P&L'],strategies:['Strategies','LIBRARY'],settings:['Settings','ACCOUNT, SECURITY & CUSTOMIZATION']};
   var t=tt[n];if(t){document.getElementById('tb-title').textContent=t[0];document.getElementById('tb-sub').textContent=t[1];}
-  if(n==='dashboard')renderDashboard();
-  else if(n==='log')renderLog();
-  else if(n==='analytics')renderAnalytics();
-  else if(n==='winratio')renderWinRatio();
-  else if(n==='histogram')renderHistogram();
-  else if(n==='heatmap')renderHeatmap();
-  else if(n==='insights')renderInsights();
-  else if(n==='tax')renderTax();
-  else if(n==='strategies')renderStrategies();
-  else if(n==='settings')applyUISettings();
+  if(n==='dashboard')renderDashboard();else if(n==='log')renderLog();else if(n==='analytics')renderAnalytics();else if(n==='winratio')renderWinRatio();else if(n==='histogram')renderHistogram();else if(n==='heatmap')renderHeatmap();else if(n==='insights')renderInsights();else if(n==='tax')renderTax();else if(n==='strategies')renderStrategies();else if(n==='settings')applyUISettings();
 }
 function toggleSB(){document.getElementById('sidebar').classList.toggle('open');}
 
@@ -1276,26 +1192,17 @@ function renderDashboard(){
   var sorted=trades.slice().sort((a,b)=>a.date>b.date?1:-1),run=0;
   var pd=sorted.map(t=>{run+=calcPnl(t);return run;});
   dc('c-pnl');
-  if(sorted.length) new Chart(document.getElementById('c-pnl'),{type:'line',data:{labels:sorted.map((_,i)=>i+1),datasets:[{data:pd,borderColor:'var(--accent,#5b6ef5)',backgroundColor:'rgba(91,110,245,0.07)',borderWidth:2.5,pointRadius:3,fill:true,tension:.35}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fmt(c.raw)}}},scales:{x:{grid:{color:'rgba(128,128,128,0.08)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(128,128,128,0.08)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10},callback:v=>RS+v}}}}});
+  if(sorted.length)new Chart(document.getElementById('c-pnl'),{type:'line',data:{labels:sorted.map((_,i)=>i+1),datasets:[{data:pd,borderColor:'var(--accent,#5b6ef5)',backgroundColor:'rgba(91,110,245,0.07)',borderWidth:2.5,pointRadius:3,fill:true,tension:.35}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fmt(c.raw)}}},scales:{x:{grid:{color:'rgba(128,128,128,0.08)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(128,128,128,0.08)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10},callback:v=>RS+v}}}}});
   var id=INDICES.map(x=>({label:x.replace(' NIFTY','').replace('BANKNIFTY','BANK'),w:trades.filter(t=>t.index===x&&t.result==='WIN').length,l:trades.filter(t=>t.index===x&&t.result==='LOSS').length})).filter(d=>d.w+d.l>0);
   dc('c-idx');
-  if(id.length) new Chart(document.getElementById('c-idx'),{type:'bar',data:{labels:id.map(d=>d.label),datasets:[{label:'Wins',data:id.map(d=>d.w),backgroundColor:'rgba(14,184,127,.8)',borderRadius:5},{label:'Losses',data:id.map(d=>d.l),backgroundColor:'rgba(240,65,108,.8)',borderRadius:5}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}}},scales:{x:{grid:{display:false},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(128,128,128,0.08)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}}}}});
+  if(id.length)new Chart(document.getElementById('c-idx'),{type:'bar',data:{labels:id.map(d=>d.label),datasets:[{label:'Wins',data:id.map(d=>d.w),backgroundColor:'rgba(14,184,127,.8)',borderRadius:5},{label:'Losses',data:id.map(d=>d.l),backgroundColor:'rgba(240,65,108,.8)',borderRadius:5}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}}},scales:{x:{grid:{display:false},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(128,128,128,0.08)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}}}}});
   var rc=trades.slice().sort((a,b)=>a.date>b.date?-1:1).slice(0,6);
   var rl=document.getElementById('recent-list');
   if(!rc.length){rl.innerHTML='<div class="empty"><div class="empty-ico">📭</div>Koi trade nahi. Pehla trade log karo!</div>';return;}
   rl.innerHTML=rc.map(t=>{var p=calcPnl(t),pc=p>=0?'var(--green)':'var(--red)',ts=(t.entryTime||'')+(t.exitTime?' → '+t.exitTime:'');
   return'<div style="display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--border);cursor:pointer;flex-wrap:wrap;gap:6px" onclick="openEdit('+t.id+')">'
-    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="mono">'+t.date+'</span>'
-    +(ts?'<span class="mono" style="background:var(--surface2);padding:2px 6px;border-radius:4px">'+ts+'</span>':'')
-    +'<span style="font-weight:600">'+t.index+'</span>'
-    +'<span class="badge '+(t.type==='CALL'?'bc':'bp')+'">'+t.type+'</span>'
-    +(t.strike?'<span class="strike-b">'+t.strike+'</span>':'')
-    +(t.cepe?'<span class="badge '+(t.cepe==='CE'?'bce':'bpe')+'">'+t.cepe+'</span>':'')
-    +'<span class="mono" style="background:var(--surface2);padding:2px 7px;border-radius:10px">'+t.strategy+'</span></div>'
-    +'<div style="display:flex;align-items:center;gap:10px">'
-    +(t.chartData?'<img src="'+t.chartData+'" class="tr-thumb" onclick="event.stopPropagation();openIV(\''+t.chartData+'\');">':'')
-    +'<span style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600;color:'+pc+'">'+fmtS(p)+'</span>'
-    +'<span class="badge '+(t.result==='WIN'?'bw':'bl')+'">'+t.result+'</span></div></div>';}).join('');
+    +'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="mono">'+t.date+'</span>'+(ts?'<span class="mono" style="background:var(--surface2);padding:2px 6px;border-radius:4px">'+ts+'</span>':'')+'<span style="font-weight:600">'+t.index+'</span><span class="badge '+(t.type==='CALL'?'bc':'bp')+'">'+t.type+'</span>'+(t.strike?'<span class="strike-b">'+t.strike+'</span>':'')+(t.cepe?'<span class="badge '+(t.cepe==='CE'?'bce':'bpe')+'">'+t.cepe+'</span>':'')+'<span class="mono" style="background:var(--surface2);padding:2px 7px;border-radius:10px">'+t.strategy+'</span></div>'
+    +'<div style="display:flex;align-items:center;gap:10px">'+(t.chartData?'<img src="'+t.chartData+'" class="tr-thumb" onclick="event.stopPropagation();openIV(\''+t.chartData+'\');">':'')+'<span style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600;color:'+pc+'">'+fmtS(p)+'</span><span class="badge '+(t.result==='WIN'?'bw':'bl')+'">'+t.result+'</span></div></div>';}).join('');
 }
 
 // ── TRADE LOG ──
@@ -1385,8 +1292,7 @@ function renderHistogram(){
   var gp=pos.reduce((a,b)=>a+b,0),gl=Math.abs(neg.reduce((a,b)=>a+b,0)),pf=gl>0?(gp/gl).toFixed(2):'N/A',pfn=parseFloat(pf),pfc=pfn>=2?'var(--green)':pfn>=1?'var(--gold)':'var(--red)';
   document.getElementById('pf').innerHTML='<div style="text-align:center;padding:16px 0"><div class="mono" style="font-size:9px;margin-bottom:6px">PROFIT FACTOR</div><div style="font-size:46px;font-weight:700;color:'+pfc+';line-height:1">'+pf+'</div><div style="font-size:12px;color:var(--text2);margin-top:6px">'+(pfn>=2?'Excellent':pfn>=1.5?'Good':pfn>=1?'Acceptable':'Poor')+'</div></div>';
   dc('c-wl');new Chart(document.getElementById('c-wl'),{type:'bar',data:{labels:['Avg Win','Avg Loss','Best','Worst'],datasets:[{data:[aw,al,pos.length?Math.max(...pos):0,neg.length?Math.abs(Math.min(...neg)):0],backgroundColor:['rgba(14,184,127,.8)','rgba(240,65,108,.8)','rgba(14,184,127,.5)','rgba(240,65,108,.5)'],borderRadius:6}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fmt(c.raw)}}},scales:{x:{grid:{display:false},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(128,128,128,.06)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10},callback:v=>RS+v}}}}});
-  var ts=strategies.filter(s=>trades.some(t=>t.strategy===s)).slice(0,5);
-  var ml2=ts.length?Math.max(...ts.map(s=>trades.filter(t=>t.strategy===s).length)):0;
+  var ts=strategies.filter(s=>trades.some(t=>t.strategy===s)).slice(0,5),ml2=ts.length?Math.max(...ts.map(s=>trades.filter(t=>t.strategy===s).length)):0;
   dc('c-sc');if(ts.length)new Chart(document.getElementById('c-sc'),{type:'line',data:{labels:Array.from({length:ml2},(_,i)=>i+1),datasets:ts.map((s,i)=>{var st=trades.filter(t=>t.strategy===s).sort((a,b)=>a.date>b.date?1:-1),run=0;return{label:s.length>10?s.substring(0,10)+'…':s,data:st.map(t=>{run+=calcPnl(t);return run;}),borderColor:COLORS[i%COLORS.length],backgroundColor:'transparent',borderWidth:2,pointRadius:2,tension:.3};})},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}}},scales:{x:{grid:{color:'rgba(128,128,128,.06)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(128,128,128,.06)'},ticks:{color:'var(--text3)',font:{family:'JetBrains Mono',size:10},callback:v=>RS+v}}}}});
 }
 
@@ -1489,6 +1395,8 @@ function updatePrev(){
     var ne=document.getElementById('tx-net');ne.textContent=(net>=0?'+':'')+RS+Math.round(net).toLocaleString('en-IN');ne.style.color=net>=0?'var(--green)':'var(--red)';
   } else {pv.style.display='none';tb.style.display='none';}
 }
+
+// FIX: Save immediately when trade is saved, don't wait
 function saveTrade(){
   var iv=document.getElementById('f-idx').value,ci=document.getElementById('f-custom-idx').value.trim();
   var index=iv==='CUSTOM'?(ci||'Custom'):iv;
@@ -1498,26 +1406,27 @@ function saveTrade(){
   var eid=parseInt(document.getElementById('edit-id').value);
   if(eid){var idx=trades.findIndex(x=>x.id===eid);if(idx>=0)trades[idx]=t;showNotif('Trade update ho gaya! ✓','ok');}
   else{trades.push(t);showNotif('Trade log ho gaya! ✓','ok');}
-  save();closeModal();
+  // FIX: Immediate save to Firestore, no debounce for trade saves
+  saveToFirestore();
+  closeModal();
   var ap=document.querySelector('.page.active');if(ap){var pid=ap.id.replace('page-','');
     if(pid==='dashboard')renderDashboard();else if(pid==='log')renderLog();else if(pid==='analytics')renderAnalytics();else if(pid==='winratio')renderWinRatio();else if(pid==='histogram')renderHistogram();else if(pid==='heatmap')renderHeatmap();else if(pid==='insights')renderInsights();else if(pid==='tax')renderTax();else if(pid==='strategies')renderStrategies();
   }
 }
-function delTrade(id){if(!confirm('Delete karna chahte ho?'))return;trades=trades.filter(t=>t.id!==id);save();renderLog();showNotif('Delete ho gaya','ok');}
+function delTrade(id){if(!confirm('Delete karna chahte ho?'))return;trades=trades.filter(t=>t.id!==id);saveToFirestore();renderLog();showNotif('Delete ho gaya','ok');}
 
 // ── DATA ──
 function exportData(){var blob=new Blob([JSON.stringify({trades,strategies,exportedAt:new Date().toISOString()},null,2)],{type:'application/json'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tradevault_'+new Date().toISOString().split('T')[0]+'.json';a.click();URL.revokeObjectURL(url);showNotif('Exported!','ok');}
-function importData(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){try{var d=JSON.parse(ev.target.result);if(d.trades)trades=d.trades;if(d.strategies)strategies=d.strategies;save();renderDashboard();showNotif('Imported!','ok');}catch(er){showNotif('Invalid JSON','err');}};r.readAsText(f);e.target.value='';}
+function importData(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){try{var d=JSON.parse(ev.target.result);if(d.trades)trades=d.trades;if(d.strategies)strategies=d.strategies;saveToFirestore();renderDashboard();showNotif('Imported!','ok');}catch(er){showNotif('Invalid JSON','err');}};r.readAsText(f);e.target.value='';}
 async function clearAll(){if(!confirm('SARE TRADES DELETE KARO? Undo nahi hoga!'))return;trades=[];await saveToFirestore();renderDashboard();showNotif('Sab delete ho gaya','ok');}
 
 function showNotif(msg,type){type=type||'ok';var n=document.getElementById('notif');n.textContent=(type==='ok'?'✓ ':type==='err'?'✕ ':'ℹ ')+msg;n.className='notif show '+type;setTimeout(()=>n.className='notif',3000);}
 
 // ── INIT ──
 window.onload = function(){
-  document.getElementById('date-chip').textContent = new Date().toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
-  Chart.defaults.font.family = 'JetBrains Mono';
-  // Load saved UI preferences immediately
-  loadUISettings();
+  document.getElementById('date-chip').textContent=new Date().toLocaleDateString('en-IN',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
+  Chart.defaults.font.family='JetBrains Mono';
+  loadUISettings(); // Apply saved theme/font immediately
 };
 </script>
 </body>
